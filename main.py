@@ -59,12 +59,6 @@ def validate_config() -> bool:
         logger.error("Please set these in your .env file. See .env.example.")
         return False
 
-    # CryptoPanic is optional — warn but don't block
-    if not config.CRYPTOPANIC_API_KEY:
-        logger.warning(
-            "CRYPTOPANIC_API_KEY not set — news features will be limited"
-        )
-
     return True
 
 
