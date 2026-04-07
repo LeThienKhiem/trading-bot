@@ -4,8 +4,13 @@ Sets up logging, validates configuration, and starts the APScheduler
 with two jobs:
   1. Trade cycle — every 4 hours (00:00, 04:00, ..., 20:00 UTC)
   2. Nightly review — daily at 23:30 UTC
+
+Usage:
+  python main.py           # Start bot in live mode
+  python main.py --verify  # Run one dry-run cycle (no real trades)
 """
 
+import argparse
 import logging
 import sys
 from datetime import datetime
@@ -69,12 +74,14 @@ def trade_cycle() -> None:
     Run one full trade cycle:
     1. Fetch all market data
     2. Get account balance and open positions
-    3. Ask Claude for a trading decision
-    4. Run safety checks and execute if appropriate
-    5. Save everything to Supabase
+    3. Calculate daily PnL
+    4. Ask Claude for a trading decision (with PnL context)
+    5. Run safety checks and execute if appropriate
+    6. Save everything to Supabase
     """
+    mode = "[DRY RUN] " if config.DRY_RUN else ""
     logger.info("=" * 60)
-    logger.info(f"TRADE CYCLE — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    logger.info(f"{mode}TRADE CYCLE — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     logger.info("=" * 60)
 
     # Step 1: Fetch market data
@@ -82,6 +89,7 @@ def trade_cycle() -> None:
     mkt_data = market_data.fetch_all_market_data()
     if mkt_data is None:
         logger.error("Failed to fetch market data — skipping this cycle")
+        notifier.notify_error("Failed to fetch market data — cycle skipped")
         return
 
     # Save market context to Supabase
@@ -99,9 +107,16 @@ def trade_cycle() -> None:
     balance = executor.get_account_balance()
     open_positions = memory.get_open_trades()
 
-    # Step 3: Ask Claude for a decision
+    # Step 3: Calculate daily PnL
+    daily_pnl = memory.calculate_daily_pnl(balance["total_usdt"])
+    logger.info(
+        f"Daily PnL: ${daily_pnl['pnl_usdt']:+.2f} ({daily_pnl['pnl_percent']:+.2f}%) "
+        f"| Target reached: {daily_pnl['target_reached']}"
+    )
+
+    # Step 4: Ask Claude for a decision
     logger.info("Step 3: Asking Claude for trading decision...")
-    decision = brain.get_trading_decision(mkt_data, balance, open_positions)
+    decision = brain.get_trading_decision(mkt_data, balance, open_positions, daily_pnl)
 
     if decision is None:
         logger.warning("Claude did not return a decision — defaulting to HOLD")
@@ -113,9 +128,10 @@ def trade_cycle() -> None:
             "market_regime": "unknown",
             "news_impact": "neutral",
             "risk_level": "high",
+            "today_pnl_consideration": "N/A — API failure",
         }
 
-    # Step 4 & 5: Execute and log
+    # Step 5 & 6: Execute and log
     logger.info(
         f"Step 4: Executing decision — {decision['action']} "
         f"(confidence: {decision.get('confidence', 0)}/10)"
@@ -130,15 +146,31 @@ def trade_cycle() -> None:
 
 def main() -> None:
     """Initialize the bot and start the scheduler."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Self-Learning Crypto Trading Bot")
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Run one dry-run cycle (no real trades) then exit",
+    )
+    args = parser.parse_args()
+
+    # Set dry-run mode if --verify flag is used
+    if args.verify:
+        config.DRY_RUN = True
+
     setup_logging()
 
+    mode_str = "DRY RUN (--verify)" if config.DRY_RUN else "LIVE"
     logger.info("=" * 60)
-    logger.info("  SELF-LEARNING CRYPTO TRADING BOT")
+    logger.info(f"  SELF-LEARNING CRYPTO TRADING BOT [{mode_str}]")
     logger.info(f"  Symbol: {config.SYMBOL}")
     logger.info(f"  Model: {config.CLAUDE_MODEL}")
     logger.info(f"  Initial Capital: ${config.INITIAL_CAPITAL}")
     logger.info(f"  Max Position: {config.MAX_POSITION_PERCENT * 100:.0f}%")
     logger.info(f"  Min Confidence: {config.MIN_CONFIDENCE_TO_TRADE}/10")
+    logger.info(f"  Daily Target: +{config.DAILY_TARGET_PERCENT}%")
+    logger.info(f"  Safety Stop: ${config.STOP_LOSS_MINIMUM_BALANCE}")
     logger.info("=" * 60)
 
     # Validate configuration
@@ -147,6 +179,14 @@ def main() -> None:
 
     # Notify startup via Telegram
     notifier.notify_startup()
+
+    # If --verify, run one cycle and exit
+    if config.DRY_RUN:
+        logger.info("Running verification cycle (dry run)...")
+        trade_cycle()
+        logger.info("Verification complete. No real trades were executed.")
+        logger.info("Review the output above and Telegram notification.")
+        return
 
     # Run one cycle immediately on startup
     logger.info("Running initial trade cycle on startup...")

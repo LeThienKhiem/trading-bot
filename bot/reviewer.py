@@ -21,6 +21,7 @@ def run_nightly_review() -> None:
     2. Build a market summary for context
     3. Ask Claude to write a daily lesson
     4. Save the lesson to Supabase
+    5. Send daily report to Telegram
     """
     logger.info("=" * 60)
     logger.info("NIGHTLY REVIEW — Starting daily self-evaluation")
@@ -33,8 +34,14 @@ def run_nightly_review() -> None:
     total = len(today_trades)
     wins = sum(1 for t in today_trades if (t.get("pnl_usdt") or 0) > 0)
     losses = sum(1 for t in today_trades if (t.get("pnl_usdt") or 0) < 0)
+    holds = sum(1 for t in today_trades if t.get("action") == "HOLD")
+    blocked = sum(1 for t in today_trades if t.get("action") == "BLOCKED")
+    total_pnl = sum(t.get("pnl_usdt", 0) or 0 for t in today_trades)
 
-    logger.info(f"Today's stats: {total} decisions, {wins} wins, {losses} losses")
+    logger.info(
+        f"Today's stats: {total} decisions, {wins} wins, {losses} losses, "
+        f"{holds} holds, {blocked} blocked, PnL: ${total_pnl:+.2f}"
+    )
 
     # 2. Build market summary
     price = get_current_price()
@@ -51,12 +58,12 @@ def run_nightly_review() -> None:
 
     if review is None:
         logger.warning("Claude failed to produce a daily review — skipping")
-        # Save a minimal record so we don't lose the day's stats
         review = {
             "lesson_text": "Review unavailable — Claude API did not respond.",
             "pattern_identified": None,
-            "adjustment_made": None,
+            "rule_for_tomorrow": None,
             "strategy_confidence": 0,
+            "market_regime_today": "unknown",
         }
 
     # 4. Save lesson to Supabase
@@ -67,7 +74,7 @@ def run_nightly_review() -> None:
         "losses": losses,
         "lesson_text": review.get("lesson_text", ""),
         "pattern_identified": review.get("pattern_identified"),
-        "adjustment_made": review.get("adjustment_made"),
+        "adjustment_made": review.get("rule_for_tomorrow"),
     }
 
     saved = memory.save_daily_lesson(lesson_data)
@@ -77,10 +84,10 @@ def run_nightly_review() -> None:
         logger.info(f"Lesson preview: {review.get('lesson_text', '')[:200]}")
         if review.get("pattern_identified"):
             logger.info(f"Pattern identified: {review['pattern_identified']}")
-        if review.get("adjustment_made"):
-            logger.info(f"Adjustment for tomorrow: {review['adjustment_made']}")
+        if review.get("rule_for_tomorrow"):
+            logger.info(f"Rule for tomorrow: {review['rule_for_tomorrow']}")
 
-        # Send daily report to Telegram
+        # 5. Send daily report to Telegram
         notifier.notify_daily_report(lesson_data, review, total, wins, losses)
     else:
         logger.error("Failed to save daily lesson to Supabase")

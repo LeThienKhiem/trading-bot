@@ -6,6 +6,7 @@ the bot never crashes due to a database failure.
 """
 
 import logging
+import os
 from datetime import datetime, date, timedelta
 from typing import Optional
 
@@ -270,6 +271,95 @@ def save_market_context(context_data: dict) -> Optional[dict]:
     except Exception as e:
         logger.error(f"Failed to save market context: {e}")
         return None
+
+
+def get_yesterday_closing_snapshot() -> Optional[dict]:
+    """
+    Fetch the last account snapshot from yesterday (the closing balance).
+    Used to calculate today's PnL vs yesterday's end-of-day.
+
+    Returns:
+        The latest snapshot from yesterday, or None.
+    """
+    try:
+        today_start = datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        result = (
+            get_client()
+            .table("account_snapshots")
+            .select("*")
+            .lt("created_at", today_start)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception as e:
+        logger.error(f"Failed to fetch yesterday's closing snapshot: {e}")
+        return None
+
+
+def get_peak_balance() -> float:
+    """
+    Fetch the highest total_value_usdt ever recorded in account_snapshots.
+
+    Returns:
+        Peak balance as float, or INITIAL_CAPITAL if no snapshots exist.
+    """
+    try:
+        result = (
+            get_client()
+            .table("account_snapshots")
+            .select("total_value_usdt")
+            .order("total_value_usdt", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]["total_value_usdt"]
+        return float(os.getenv("INITIAL_CAPITAL", "100"))
+    except Exception as e:
+        logger.error(f"Failed to fetch peak balance: {e}")
+        return float(os.getenv("INITIAL_CAPITAL", "100"))
+
+
+# ── Daily PnL ────────────────────────────────────────────────────────────────
+
+def calculate_daily_pnl(current_total: float) -> dict:
+    """
+    Calculate today's PnL compared to yesterday's closing snapshot.
+
+    Args:
+        current_total: Current portfolio value in USDT.
+
+    Returns:
+        Dict with pnl_usdt, pnl_percent, target_reached, peak_balance,
+        current_drawdown_percent.
+    """
+    import config
+
+    yesterday = get_yesterday_closing_snapshot()
+    peak = get_peak_balance()
+
+    if yesterday and yesterday.get("total_value_usdt", 0) > 0:
+        yesterday_total = yesterday["total_value_usdt"]
+        pnl_usdt = current_total - yesterday_total
+        pnl_percent = (pnl_usdt / yesterday_total) * 100
+    else:
+        pnl_usdt = 0.0
+        pnl_percent = 0.0
+
+    target_reached = pnl_percent >= config.DAILY_TARGET_PERCENT
+    drawdown = ((peak - current_total) / peak * 100) if peak > 0 else 0.0
+
+    return {
+        "pnl_usdt": round(pnl_usdt, 2),
+        "pnl_percent": round(pnl_percent, 2),
+        "target_reached": target_reached,
+        "peak_balance": round(peak, 2),
+        "current_drawdown_percent": round(drawdown, 2),
+    }
 
 
 # ── Utility ──────────────────────────────────────────────────────────────────

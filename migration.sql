@@ -7,16 +7,16 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ── 1. Trades Table ─────────────────────────────────────────────────────────
--- Stores every trading decision (BUY, SELL, HOLD) with Claude's reasoning.
+-- Stores every trading decision (BUY, SELL, HOLD, BLOCKED) with Claude's reasoning.
 CREATE TABLE IF NOT EXISTS trades (
     id              UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-    action          TEXT NOT NULL CHECK (action IN ('BUY', 'SELL', 'HOLD')),
+    action          TEXT NOT NULL CHECK (action IN ('BUY', 'SELL', 'HOLD', 'BLOCKED')),
     symbol          TEXT DEFAULT 'BTCUSDT',
     price_at_decision FLOAT NOT NULL,
     quantity_usdt   FLOAT DEFAULT 0,
     reasoning       TEXT,
-    confidence      INT CHECK (confidence >= 1 AND confidence <= 10),
+    confidence      INT CHECK (confidence >= 0 AND confidence <= 10),
     suggested_stop_loss FLOAT,
     status          TEXT DEFAULT 'open' CHECK (status IN ('open', 'closed', 'stopped')),
     exit_price      FLOAT,
@@ -91,3 +91,13 @@ CREATE POLICY "Allow all for authenticated" ON account_snapshots
     FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for authenticated" ON market_contexts
     FOR ALL USING (true) WITH CHECK (true);
+
+-- ── Migration: Update existing tables (run if tables already exist) ─────────
+-- Adds BLOCKED action support and relaxes confidence constraint for HOLD/BLOCKED
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_action_check;
+ALTER TABLE trades ADD CONSTRAINT trades_action_check
+    CHECK (action IN ('BUY', 'SELL', 'HOLD', 'BLOCKED'));
+
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_confidence_check;
+ALTER TABLE trades ADD CONSTRAINT trades_confidence_check
+    CHECK (confidence >= 0 AND confidence <= 10);

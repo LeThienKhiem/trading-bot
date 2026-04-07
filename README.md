@@ -57,10 +57,12 @@ migration.sql        → Supabase database schema
 
 1. Get an API key from [console.anthropic.com](https://console.anthropic.com)
 
-### 4. CryptoPanic API (Optional)
+### 4. Telegram Bot
 
-1. Register at [cryptopanic.com/developers/api](https://cryptopanic.com/developers/api/)
-2. Get your free API token
+1. Open Telegram, find **@BotFather**
+2. Send `/newbot`, follow the prompts
+3. Copy the Bot Token
+4. Start the bot, send a message, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to get your Chat ID
 
 ### 5. Environment Variables
 
@@ -76,11 +78,13 @@ BINANCE_API_SECRET=your_secret
 ANTHROPIC_API_KEY=sk-ant-...
 SUPABASE_URL=https://xxx.supabase.co
 SUPABASE_ANON_KEY=eyJ...
-CRYPTOPANIC_API_KEY=your_token
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
 INITIAL_CAPITAL=100
 MAX_POSITION_PERCENT=0.30
 STOP_LOSS_MINIMUM_BALANCE=70
 MIN_CONFIDENCE_TO_TRADE=7
+DAILY_TARGET_PERCENT=2.0
 ```
 
 ### 6. Install Dependencies
@@ -92,6 +96,10 @@ pip install -r requirements.txt
 ### 7. Run
 
 ```bash
+# Verify mode — dry run, no real trades, tests full pipeline
+python main.py --verify
+
+# Live mode — starts trading for real
 python main.py
 ```
 
@@ -99,6 +107,7 @@ The bot will:
 - Run one trade cycle immediately on startup
 - Then follow the 4-hour schedule automatically
 - Log to both console and `trading-bot.log`
+- Send notifications to Telegram
 
 ## Safety Features
 
@@ -106,10 +115,12 @@ The bot will:
 |-------|-------------|
 | Min confidence | Only trades when Claude confidence >= 7/10 |
 | Balance protection | Stops all trading if total < $70 |
+| Daily target | Switches to HOLD-only after +2% daily gain |
 | Position limit | Max 30% of USDT per trade |
 | BTC cap | Cannot BUY if BTC > 50% of portfolio |
 | News alert | Forces HOLD on `high_alert` news |
 | API fallback | Defaults to HOLD if Claude/Binance API fails |
+| Position isolation | Only sells BTC the bot bought, not user's DCA holdings |
 
 ## Deploy to Ubuntu VPS with systemd
 

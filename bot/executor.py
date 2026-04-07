@@ -33,7 +33,6 @@ def get_bot_btc_quantity() -> float:
     total_btc = 0.0
     for t in open_trades:
         if t.get("action") == "BUY" and t.get("quantity_usdt") and t.get("price_at_decision"):
-            # quantity_usdt / price = approximate BTC bought
             total_btc += t["quantity_usdt"] / t["price_at_decision"]
     return total_btc
 
@@ -83,6 +82,7 @@ def get_account_balance() -> dict:
 def save_account_snapshot(balance: Optional[dict] = None) -> None:
     """
     Save current account state to Supabase account_snapshots table.
+    Includes daily PnL and drawdown calculations.
 
     Args:
         balance: Optional pre-fetched balance dict. Fetches fresh if None.
@@ -90,17 +90,25 @@ def save_account_snapshot(balance: Optional[dict] = None) -> None:
     if balance is None:
         balance = get_account_balance()
 
+    daily_pnl = memory.calculate_daily_pnl(balance["total_usdt"])
+
     snapshot = {
         "usdt_balance": balance["usdt"],
         "btc_balance": balance.get("btc_bot", balance["btc"]),
         "total_value_usdt": balance["total_usdt"],
+        "daily_pnl_percent": daily_pnl["pnl_percent"],
     }
     memory.save_account_snapshot(snapshot)
 
 
 # ── Safety Checks ────────────────────────────────────────────────────────────
 
-def run_safety_checks(decision: dict, balance: dict, open_positions: list[dict]) -> tuple[bool, str]:
+def run_safety_checks(
+    decision: dict,
+    balance: dict,
+    open_positions: list[dict],
+    daily_pnl: Optional[dict] = None,
+) -> tuple[bool, str]:
     """
     Run all safety checks before executing a trade.
 
@@ -108,6 +116,7 @@ def run_safety_checks(decision: dict, balance: dict, open_positions: list[dict])
         decision: Claude's decision dict (action, confidence, news_impact, etc.).
         balance: Current account balance dict.
         open_positions: List of open position dicts.
+        daily_pnl: Optional daily PnL info dict.
 
     Returns:
         Tuple of (is_safe, reason).
@@ -122,18 +131,36 @@ def run_safety_checks(decision: dict, balance: dict, open_positions: list[dict])
     if action == "HOLD":
         return True, "HOLD decision — no execution needed"
 
+    # Hard stop: protect minimum balance
+    if balance["total_usdt"] < config.STOP_LOSS_MINIMUM_BALANCE:
+        notifier.notify_error(
+            f"🚨 SAFETY STOP TRIGGERED\n"
+            f"Balance dropped to ${balance['total_usdt']:.2f} "
+            f"(below ${config.STOP_LOSS_MINIMUM_BALANCE} threshold)\n"
+            f"Bot paused. Review required."
+        )
+        return False, (
+            f"HARD STOP: Total balance ${balance['total_usdt']:.2f} is below "
+            f"minimum ${config.STOP_LOSS_MINIMUM_BALANCE} — forcing HOLD"
+        )
+
+    # Daily target reached — switch to HOLD-only mode
+    if daily_pnl and daily_pnl.get("target_reached"):
+        notifier.notify_error(
+            f"✅ Daily target +{config.DAILY_TARGET_PERCENT}% reached!\n"
+            f"Switching to HOLD mode for today.\n"
+            f"Balance: ${balance['total_usdt']:.2f}"
+        )
+        return False, (
+            f"Daily target +{config.DAILY_TARGET_PERCENT}% reached — "
+            f"HOLD-only mode to protect gains"
+        )
+
     # Check minimum confidence
     if confidence < config.MIN_CONFIDENCE_TO_TRADE:
         return False, (
             f"Confidence {confidence}/10 is below minimum "
             f"{config.MIN_CONFIDENCE_TO_TRADE}/10 — forcing HOLD"
-        )
-
-    # Hard stop: protect minimum balance
-    if balance["total_usdt"] < config.STOP_LOSS_MINIMUM_BALANCE:
-        return False, (
-            f"HARD STOP: Total balance ${balance['total_usdt']:.2f} is below "
-            f"minimum ${config.STOP_LOSS_MINIMUM_BALANCE} — forcing HOLD"
         )
 
     # High alert news = always HOLD
@@ -142,7 +169,6 @@ def run_safety_checks(decision: dict, balance: dict, open_positions: list[dict])
 
     # BUY-specific checks
     if action == "BUY":
-        # Check if bot's BTC position is already >50% of bot's portfolio
         btc_bot_value = balance.get("btc_bot", 0) * (get_current_price() or 0)
         if btc_bot_value > balance["total_usdt"] * 0.5:
             return False, (
@@ -150,9 +176,8 @@ def run_safety_checks(decision: dict, balance: dict, open_positions: list[dict])
                 f"bot portfolio — cannot BUY more"
             )
 
-        # Check if we have enough USDT to trade
         trade_amount = balance["usdt"] * config.MAX_POSITION_PERCENT
-        if trade_amount < 10:  # Binance minimum is ~$10
+        if trade_amount < 10:
             return False, (
                 f"Trade amount ${trade_amount:.2f} is below Binance minimum"
             )
@@ -170,7 +195,8 @@ def run_safety_checks(decision: dict, balance: dict, open_positions: list[dict])
 def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
     """
     Execute a trading decision after running safety checks.
-    Handles BUY, SELL, and HOLD actions. Logs all decisions to Supabase.
+    Handles BUY, SELL, HOLD, and BLOCKED actions. Logs all decisions to Supabase.
+    Supports dry-run mode (config.DRY_RUN) which skips actual Binance execution.
 
     Args:
         decision: Claude's decision dict.
@@ -181,17 +207,19 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
     """
     balance = get_account_balance()
     open_positions = memory.get_open_trades()
+    daily_pnl = memory.calculate_daily_pnl(balance["total_usdt"])
 
     # Run safety checks
-    is_safe, reason = run_safety_checks(decision, balance, open_positions)
+    is_safe, reason = run_safety_checks(decision, balance, open_positions, daily_pnl)
 
-    action = decision.get("action", "HOLD")
+    original_action = decision.get("action", "HOLD")
+    action = original_action
     price = market_data.get("btc_price", 0)
 
-    # If safety check fails, override to HOLD
-    if not is_safe:
+    # If safety check fails, log as BLOCKED
+    if not is_safe and action != "HOLD":
         logger.warning(f"Safety check blocked {action}: {reason}")
-        action = "HOLD"
+        action = "BLOCKED"
 
     # Calculate stop loss price
     stop_loss_pct = decision.get("suggested_stop_loss_percent", 5)
@@ -206,8 +234,23 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
         "reasoning": decision.get("reasoning", reason),
         "confidence": decision.get("confidence", 0),
         "suggested_stop_loss": stop_loss_price,
-        "status": "open" if action in ("BUY", "SELL") else "closed",
+        "status": "closed" if action in ("HOLD", "BLOCKED") else "open",
     }
+
+    # Add block reason to reasoning
+    if action == "BLOCKED":
+        trade_record["reasoning"] = (
+            f"[BLOCKED: {reason}] Original: {original_action}. "
+            f"{decision.get('reasoning', '')}"
+        )
+
+    # Dry-run mode: log but don't execute
+    if config.DRY_RUN:
+        logger.info(f"[DRY RUN] Would execute: {action} @ ${price:,.2f}")
+        trade_record["reasoning"] = f"[DRY RUN] {trade_record['reasoning']}"
+        if action in ("BUY", "SELL"):
+            trade_record["status"] = "closed"
+            action = "HOLD"  # Don't execute
 
     # Execute the trade on Binance
     if action == "BUY":
@@ -219,12 +262,11 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
                 f"BUY executed: {trade_result['btc_qty']:.8f} BTC "
                 f"@ ${trade_result['fill_price']:,.2f}"
             )
-            # Save snapshot after trade
             save_account_snapshot()
         else:
-            trade_record["action"] = "HOLD"
+            trade_record["action"] = "BLOCKED"
             trade_record["status"] = "closed"
-            trade_record["reasoning"] += " [BUY execution failed — reverted to HOLD]"
+            trade_record["reasoning"] += " [BUY execution failed on Binance]"
 
     elif action == "SELL":
         trade_result = _execute_sell(balance, price, open_positions)
@@ -235,14 +277,12 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
                 f"SELL executed: {trade_result['btc_qty']:.8f} BTC "
                 f"@ ${trade_result['fill_price']:,.2f}"
             )
-            # Close open BUY positions and calculate PnL
             _close_open_positions(open_positions, trade_result["fill_price"])
-            # Save snapshot after trade
             save_account_snapshot()
         else:
-            trade_record["action"] = "HOLD"
+            trade_record["action"] = "BLOCKED"
             trade_record["status"] = "closed"
-            trade_record["reasoning"] += " [SELL execution failed — reverted to HOLD]"
+            trade_record["reasoning"] += " [SELL execution failed on Binance]"
 
     # Always log the decision to Supabase
     saved = memory.save_trade(trade_record)
@@ -250,15 +290,13 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
     # Save account snapshot on each cycle
     save_account_snapshot(balance)
 
-    # Send Telegram notification
-    notifier.notify_trade(decision, market_data, balance)
-
-    # Alert on safety blocks
-    if not is_safe:
-        notifier.notify_error(f"Safety check blocked {decision.get('action')}: {reason}")
+    # Send Telegram notification with daily PnL info
+    notifier.notify_trade(decision, market_data, balance, daily_pnl)
 
     return saved
 
+
+# ── Binance Order Helpers ────────────────────────────────────────────────────
 
 def _execute_buy(balance: dict, current_price: float) -> Optional[dict]:
     """
@@ -279,7 +317,6 @@ def _execute_buy(balance: dict, current_price: float) -> Optional[dict]:
             logger.warning(f"Insufficient USDT to buy: ${usdt_to_spend}")
             return None
 
-        # Market buy using quoteOrderQty (spend exact USDT amount)
         order = client.create_order(
             symbol=config.SYMBOL,
             side=SIDE_BUY,
@@ -287,7 +324,6 @@ def _execute_buy(balance: dict, current_price: float) -> Optional[dict]:
             quoteOrderQty=usdt_to_spend,
         )
 
-        # Parse fill details
         fills = order.get("fills", [])
         total_qty = sum(float(f["qty"]) for f in fills)
         total_cost = sum(float(f["qty"]) * float(f["price"]) for f in fills)
@@ -326,14 +362,12 @@ def _execute_sell(
     try:
         client = get_binance_client()
 
-        # Only sell BTC the bot owns, not the user's existing holdings
         btc_to_sell = balance.get("btc_bot", 0)
 
         if btc_to_sell <= 0:
             logger.warning("Bot has no BTC positions to sell")
             return None
 
-        # Cap at actual available BTC in case of discrepancy
         if btc_to_sell > balance["btc"]:
             logger.warning(
                 f"Bot thinks it owns {btc_to_sell:.8f} BTC but account "

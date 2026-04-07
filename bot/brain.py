@@ -31,31 +31,45 @@ def get_client() -> anthropic.Anthropic:
 
 # ── System Prompt ────────────────────────────────────────────────────────────
 
-TRADING_SYSTEM_PROMPT = """You are an expert cryptocurrency trader managing a BTC/USDT portfolio on Binance Spot.
+TRADING_SYSTEM_PROMPT = """You are an expert crypto trading AI managing a $100 BTC/USDT spot portfolio.
 
-Your job:
-1. Analyze all provided market data holistically (price, RSI, MACD, volume, Fear & Greed, news).
-2. Review past trade history and lessons learned to avoid repeating mistakes.
-3. Consider news impact on short-term price movement.
-4. Make a clear BUY, SELL, or HOLD decision.
+PERSONALITY: Balanced — protect capital first, grow consistently second.
+Do not chase pumps. Do not panic sell bottoms. Think in probabilities.
 
-Rules:
-- Be conservative. Protect capital first, grow second.
-- Only suggest BUY when multiple indicators align (e.g., oversold RSI + bullish MACD + positive news).
-- Suggest SELL to lock in profits or cut losses when trend reverses.
-- Default to HOLD when signals are mixed or uncertain.
-- Always explain your reasoning clearly, referencing specific data points.
-- If news indicates a major event (hack, regulation, black swan), lean toward HOLD regardless.
+YOUR DAILY TARGET: +2% on total portfolio value.
+- If already up >2% today: recommend HOLD to protect gains
+- If down >5% today: be more conservative, preserve capital
+- Normal conditions: seek high-confidence setups only
 
-You MUST respond with ONLY valid JSON in this exact format, no markdown, no extra text:
+DECISION FRAMEWORK:
+1. Check market regime first (trending/sideways/volatile)
+2. In volatile/unclear market: default to HOLD
+3. Only BUY when: RSI not overbought (<65), clear support level,
+   positive/neutral news, confidence >= 7
+4. Only SELL when: holding BTC position AND
+   (target reached OR stop loss triggered OR trend reversal confirmed)
+5. HOLD when: uncertain, conflicting signals, or news_impact = high_alert
+
+LEARNING: You will receive your last 30 trades with outcomes and
+14 daily lessons. Reference them explicitly in your reasoning.
+Say things like: "Last 3 times RSI was above 70, price dropped —
+avoiding BUY" or "Lesson from Day 5: don't trade during high volatility"
+
+RISK AWARENESS:
+- This is a real person's $100. Every loss matters.
+- A confident wrong decision is worse than a cautious HOLD.
+- If unsure: HOLD. There will always be another opportunity.
+
+OUTPUT: Return ONLY valid JSON, no markdown, no explanation outside JSON:
 {
   "action": "BUY" | "SELL" | "HOLD",
   "confidence": 1-10,
-  "reasoning": "detailed explanation referencing specific data points",
+  "reasoning": "2-3 sentences explaining WHY, referencing past lessons if relevant",
   "suggested_stop_loss_percent": 3-7,
   "market_regime": "trending_up" | "trending_down" | "sideways" | "volatile",
   "news_impact": "positive" | "negative" | "neutral" | "high_alert",
-  "risk_level": "low" | "medium" | "high"
+  "risk_level": "low" | "medium" | "high",
+  "today_pnl_consideration": "brief note on today's P&L and how it affects decision"
 }"""
 
 
@@ -65,6 +79,7 @@ def build_context(
     market_data: dict,
     account_balance: dict,
     open_positions: list[dict],
+    daily_pnl: Optional[dict] = None,
 ) -> str:
     """
     Build a comprehensive context string for Claude from all available data.
@@ -73,6 +88,7 @@ def build_context(
         market_data: Dict from market_data.fetch_all_market_data().
         account_balance: Dict with 'usdt' and 'btc' balances.
         open_positions: List of open trade dicts from Supabase.
+        daily_pnl: Optional dict with today's PnL info.
 
     Returns:
         Formatted context string for the Claude prompt.
@@ -84,7 +100,7 @@ def build_context(
 
     # Format recent trades summary
     trades_summary = ""
-    for t in recent_trades[:10]:  # Show last 10 in detail
+    for t in recent_trades[:10]:
         pnl = t.get("pnl_usdt")
         pnl_str = f"PnL: ${pnl:.2f}" if pnl is not None else "PnL: pending"
         trades_summary += (
@@ -94,9 +110,10 @@ def build_context(
 
     # Format lessons summary
     lessons_summary = ""
-    for lesson in recent_lessons[:5]:  # Show last 5 lessons
+    for lesson in recent_lessons[:7]:
         lessons_summary += (
-            f"  [{lesson.get('date')}] {lesson.get('lesson_text', 'N/A')[:150]}\n"
+            f"  [{lesson.get('date')}] {lesson.get('lesson_text', 'N/A')[:200]}\n"
+            f"    Rule: {lesson.get('adjustment_made', 'N/A')}\n"
         )
 
     # Format open positions
@@ -106,6 +123,16 @@ def build_context(
             f"  - {p['action']} @ ${p.get('price_at_decision', 0):,.2f} "
             f"(stop loss: ${p.get('suggested_stop_loss', 'N/A')})"
             for p in open_positions
+        )
+
+    # Format daily PnL
+    pnl_str = "No data yet (first cycle of the day)"
+    if daily_pnl:
+        pnl_str = (
+            f"Today's PnL: ${daily_pnl.get('pnl_usdt', 0):+.2f} "
+            f"({daily_pnl.get('pnl_percent', 0):+.2f}%)\n"
+            f"Daily target (+{config.DAILY_TARGET_PERCENT}%): "
+            f"{'REACHED — protect gains' if daily_pnl.get('target_reached') else 'not yet reached'}"
         )
 
     context = f"""=== CURRENT MARKET DATA ===
@@ -121,8 +148,11 @@ News Sentiment: {market_data.get('news_sentiment', 'neutral')}
 
 === ACCOUNT ===
 USDT Balance: ${account_balance.get('usdt', 0):,.2f}
-BTC Balance: {account_balance.get('btc', 0):.8f}
-Total Portfolio Value: ~${account_balance.get('total_usdt', 0):,.2f}
+Bot BTC: {account_balance.get('btc_bot', 0):.8f}
+Bot Portfolio Value: ~${account_balance.get('total_usdt', 0):,.2f}
+
+=== TODAY'S P&L ===
+{pnl_str}
 
 === OPEN POSITIONS ===
 {positions_str}
@@ -132,7 +162,7 @@ Win Rate: {win_rate:.1%} ({len(recent_trades)} trades)
 Recent trades:
 {trades_summary or '  No trades yet'}
 
-=== LESSONS LEARNED ===
+=== LESSONS LEARNED (Last 14 days) ===
 {lessons_summary or '  No lessons yet — this is the beginning of the journey.'}
 """
     return context
@@ -142,6 +172,7 @@ def get_trading_decision(
     market_data: dict,
     account_balance: dict,
     open_positions: list[dict],
+    daily_pnl: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     Ask Claude to make a trading decision based on all available context.
@@ -150,13 +181,12 @@ def get_trading_decision(
         market_data: Dict from market_data.fetch_all_market_data().
         account_balance: Dict with 'usdt', 'btc', 'total_usdt' keys.
         open_positions: List of open trade dicts.
+        daily_pnl: Optional dict with today's PnL info.
 
     Returns:
-        Parsed JSON decision dict with keys: action, confidence, reasoning,
-        suggested_stop_loss_percent, market_regime, news_impact, risk_level.
-        Returns None if Claude API fails (defaults to HOLD in caller).
+        Parsed JSON decision dict, or None if Claude API fails.
     """
-    context = build_context(market_data, account_balance, open_positions)
+    context = build_context(market_data, account_balance, open_positions, daily_pnl)
 
     try:
         response = get_client().messages.create(
@@ -211,22 +241,27 @@ def get_trading_decision(
 
 # ── Nightly Review ───────────────────────────────────────────────────────────
 
-REVIEW_SYSTEM_PROMPT = """You are a trading coach reviewing a crypto trading bot's daily performance.
+REVIEW_SYSTEM_PROMPT = """You are reviewing your own trading performance for today.
+Be honest, critical, and specific. Vague lessons are useless.
 
-Your job is to write a thoughtful daily reflection that will help the bot improve tomorrow.
+REVIEW STRUCTURE:
+1. Performance summary (wins/losses/P&L today)
+2. For each LOSING trade: exactly what signal was wrong and why
+3. For each WINNING trade: what worked and can it be repeated
+4. Pattern check: compare today vs last 7 lessons — any recurring mistake?
+5. Market regime assessment: what kind of market was today?
+6. ONE specific rule to add/change for tomorrow
+   (e.g. "Do not BUY when Fear & Greed > 75" or
+    "RSI divergence on 4h is more reliable than 1h")
+7. Confidence in current strategy: 1-10, with honest explanation
 
-Analyze the trades, market conditions, wins, and losses. Be specific about:
-1. What worked and WHY (reference specific indicators that aligned)
-2. What failed and WHY (what signal was wrong or ignored)
-3. Any pattern you notice across recent days
-4. One specific, actionable adjustment for tomorrow
-
-You MUST respond with ONLY valid JSON in this exact format:
+OUTPUT: Valid JSON only:
 {
-  "lesson_text": "2-3 paragraph reflection on today's performance",
-  "pattern_identified": "specific pattern noticed, or null if none",
-  "adjustment_made": "specific change to apply tomorrow",
-  "strategy_confidence": 1-10
+  "lesson_text": "full honest review (2-3 paragraphs)",
+  "pattern_identified": "specific recurring pattern or null",
+  "rule_for_tomorrow": "ONE specific actionable rule",
+  "strategy_confidence": 1-10,
+  "market_regime_today": "trending_up|trending_down|sideways|volatile"
 }"""
 
 
@@ -246,11 +281,12 @@ def get_daily_review(
     Returns:
         Parsed JSON review dict, or None on failure.
     """
-    # Calculate stats
     total = len(today_trades)
     wins = sum(1 for t in today_trades if (t.get("pnl_usdt") or 0) > 0)
     losses = sum(1 for t in today_trades if (t.get("pnl_usdt") or 0) < 0)
     holds = sum(1 for t in today_trades if t.get("action") == "HOLD")
+    blocked = sum(1 for t in today_trades if t.get("action") == "BLOCKED")
+    total_pnl = sum(t.get("pnl_usdt", 0) or 0 for t in today_trades)
 
     trades_detail = ""
     for t in today_trades:
@@ -259,29 +295,32 @@ def get_daily_review(
         trades_detail += (
             f"  - {t['action']} @ ${t.get('price_at_decision', 0):,.2f} | "
             f"PnL: {pnl_str} | Confidence: {t.get('confidence')}/10 | "
-            f"Reason: {t.get('reasoning', 'N/A')[:100]}\n"
+            f"Reason: {t.get('reasoning', 'N/A')[:150]}\n"
         )
 
     lessons_context = ""
     for lesson in recent_lessons[:7]:
         lessons_context += (
-            f"  [{lesson.get('date')}] {lesson.get('lesson_text', '')[:120]}\n"
+            f"  [{lesson.get('date')}] {lesson.get('lesson_text', '')[:150]}\n"
+            f"    Rule: {lesson.get('adjustment_made', 'N/A')}\n"
         )
 
     review_prompt = f"""=== TODAY'S PERFORMANCE ===
 Total decisions: {total}
-Wins: {wins} | Losses: {losses} | Holds: {holds}
+Wins: {wins} | Losses: {losses} | Holds: {holds} | Blocked: {blocked}
+Total P&L today: ${total_pnl:+.2f}
 
-=== TODAY'S TRADES ===
+=== TODAY'S TRADES (DETAIL) ===
 {trades_detail or '  No trades executed today (all HOLDs or no cycles ran).'}
 
 === MARKET CONDITIONS TODAY ===
 {market_summary}
 
-=== RECENT LESSONS (for context) ===
+=== RECENT LESSONS (last 7 days for pattern comparison) ===
 {lessons_context or '  No previous lessons yet.'}
 
-Please write today's daily review."""
+Write today's review. Be specific about what went right, what went wrong,
+and give ONE concrete rule for tomorrow."""
 
     try:
         response = get_client().messages.create(

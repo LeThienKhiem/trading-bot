@@ -33,6 +33,8 @@ INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "100"))
 MAX_POSITION_PERCENT = float(os.getenv("MAX_POSITION_PERCENT", "0.30"))
 STOP_LOSS_MINIMUM_BALANCE = float(os.getenv("STOP_LOSS_MINIMUM_BALANCE", "70"))
 MIN_CONFIDENCE_TO_TRADE = int(os.getenv("MIN_CONFIDENCE_TO_TRADE", "7"))
+DAILY_TARGET_PERCENT = float(os.getenv("DAILY_TARGET_PERCENT", "2.0"))
+DRY_RUN = False  # Set to True via --verify flag at runtime
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 TRADE_CYCLE_HOURS = [0, 4, 8, 12, 16, 20]  # UTC hours for trade cycles

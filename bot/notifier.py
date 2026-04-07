@@ -7,6 +7,7 @@ All sends are wrapped in try/except — notification failure never crashes the b
 
 import logging
 from datetime import datetime
+from typing import Optional
 
 import requests
 
@@ -47,41 +48,59 @@ def send_message(text: str, parse_mode: str = "HTML") -> bool:
         return False
 
 
-def notify_trade(decision: dict, market_data: dict, balance: dict) -> None:
+def notify_trade(
+    decision: dict,
+    market_data: dict,
+    balance: dict,
+    daily_pnl: Optional[dict] = None,
+) -> None:
     """
     Send a trade notification after each cycle decision.
+    Covers BUY, SELL, HOLD, and BLOCKED actions.
 
     Args:
-        decision: Claude's decision dict (action, confidence, reasoning, etc.).
+        decision: Claude's decision dict.
         market_data: Current market data dict.
         balance: Current account balance dict.
+        daily_pnl: Optional daily PnL info dict.
     """
     action = decision.get("action", "HOLD")
     confidence = decision.get("confidence", 0)
     reasoning = decision.get("reasoning", "N/A")
     price = market_data.get("btc_price", 0)
     rsi = market_data.get("rsi_1h", "N/A")
-    macd = market_data.get("macd_signal", "N/A")
-    fear_greed = market_data.get("fear_greed_index", "N/A")
-    risk = decision.get("risk_level", "N/A")
     regime = decision.get("market_regime", "N/A")
+    news = decision.get("news_impact", "N/A")
+    risk = decision.get("risk_level", "N/A")
 
-    # Emoji based on action
-    emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⏸️"}.get(action, "❓")
+    emoji = {
+        "BUY": "🟢", "SELL": "🔴", "HOLD": "⏸️", "BLOCKED": "🚫"
+    }.get(action, "❓")
+
+    # Daily PnL line
+    if daily_pnl:
+        pnl_line = (
+            f"Today P&L: ${daily_pnl.get('pnl_usdt', 0):+.2f} "
+            f"({daily_pnl.get('pnl_percent', 0):+.2f}%)"
+        )
+    else:
+        pnl_line = "Today P&L: N/A (first cycle)"
 
     text = (
-        f"{emoji} <b>{action}</b> | Confidence: {confidence}/10\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 DECISION: <b>{emoji} {action}</b>\n"
         f"💰 BTC Price: <b>${price:,.2f}</b>\n"
-        f"📊 RSI: {rsi} | MACD: {macd}\n"
-        f"😱 Fear & Greed: {fear_greed}/100\n"
-        f"📈 Regime: {regime} | Risk: {risk}\n"
+        f"📊 Confidence: {confidence}/10\n"
+        f"📈 RSI: {rsi} | Regime: {regime}\n"
+        f"📰 News: {news}\n"
+        f"🔒 Risk: {risk}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💼 USDT: ${balance.get('usdt', 0):,.2f}\n"
+        f"💡 <i>{reasoning[:300]}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💼 Balance: ${balance.get('usdt', 0):,.2f} USDT\n"
         f"₿ Bot BTC: {balance.get('btc_bot', 0):.8f}\n"
-        f"💵 Bot Portfolio: ${balance.get('total_usdt', 0):,.2f}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💬 <i>{reasoning[:300]}</i>"
+        f"💵 Portfolio: ${balance.get('total_usdt', 0):,.2f}\n"
+        f"{pnl_line}"
     )
 
     send_message(text)
@@ -106,22 +125,24 @@ def notify_daily_report(
     """
     lesson_text = review.get("lesson_text", "N/A")
     pattern = review.get("pattern_identified", "None")
-    adjustment = review.get("adjustment_made", "None")
+    rule = review.get("rule_for_tomorrow", review.get("adjustment_made", "None"))
     confidence = review.get("strategy_confidence", "N/A")
+    regime = review.get("market_regime_today", "N/A")
 
     win_rate = f"{wins/total*100:.0f}%" if total > 0 else "N/A"
 
     text = (
-        f"📋 <b>DAILY REPORT</b> — {datetime.utcnow().strftime('%Y-%m-%d')}\n"
+        f"📋 <b>DAILY REVIEW</b> — {datetime.utcnow().strftime('%Y-%m-%d')}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Trades: {total} | Wins: {wins} | Losses: {losses}\n"
         f"🎯 Win Rate: {win_rate}\n"
+        f"📈 Market: {regime}\n"
         f"🧠 Strategy Confidence: {confidence}/10\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 <b>Lesson:</b>\n<i>{lesson_text[:500]}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔍 Pattern: {pattern or 'None'}\n"
-        f"🔧 Adjustment: {adjustment or 'None'}"
+        f"📌 Rule for tomorrow: {rule or 'None'}"
     )
 
     send_message(text)
@@ -144,13 +165,16 @@ def notify_error(error_msg: str) -> None:
 
 def notify_startup() -> None:
     """Send a notification when the bot starts up."""
+    mode = "🔬 DRY RUN" if config.DRY_RUN else "🟢 LIVE"
     text = (
-        f"🤖 <b>Trading Bot Started</b>\n"
+        f"🤖 <b>Trading Bot Started</b> [{mode}]\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Symbol: {config.SYMBOL}\n"
         f"Model: {config.CLAUDE_MODEL}\n"
         f"Max Position: {config.MAX_POSITION_PERCENT*100:.0f}%\n"
         f"Min Confidence: {config.MIN_CONFIDENCE_TO_TRADE}/10\n"
+        f"Daily Target: +{config.DAILY_TARGET_PERCENT}%\n"
+        f"Safety Stop: ${config.STOP_LOSS_MINIMUM_BALANCE}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⏰ Trade cycle: every 4h\n"
         f"📋 Review: daily 23:30 UTC"
