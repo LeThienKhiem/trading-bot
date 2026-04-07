@@ -21,6 +21,10 @@ CLAUDE_TIMEOUT = 30  # seconds
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 
+# ── Telegram ─────────────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # ── News (CoinGecko — free, no key required) ────────────────────────────────
 
 # ── Trading Parameters ───────────────────────────────────────────────────────

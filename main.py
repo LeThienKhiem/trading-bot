@@ -14,7 +14,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import config
-from bot import market_data, brain, executor, memory, reviewer
+from bot import market_data, brain, executor, memory, reviewer, notifier
 
 # ── Logging Setup ────────────────────────────────────────────────────────────
 
@@ -151,6 +151,9 @@ def main() -> None:
     if not validate_config():
         sys.exit(1)
 
+    # Notify startup via Telegram
+    notifier.notify_startup()
+
     # Run one cycle immediately on startup
     logger.info("Running initial trade cycle on startup...")
     trade_cycle()
@@ -189,6 +192,7 @@ def main() -> None:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.critical(f"Unexpected error: {e}", exc_info=True)
+        notifier.notify_error(f"Bot crashed: {e}")
 
 
 if __name__ == "__main__":

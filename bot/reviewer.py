@@ -8,7 +8,7 @@ The lesson is saved to Supabase for use in future trading decisions.
 import logging
 from datetime import date
 
-from bot import memory, brain
+from bot import memory, brain, notifier
 from bot.market_data import get_current_price, get_fear_greed_index
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,11 @@ def run_nightly_review() -> None:
             logger.info(f"Pattern identified: {review['pattern_identified']}")
         if review.get("adjustment_made"):
             logger.info(f"Adjustment for tomorrow: {review['adjustment_made']}")
+
+        # Send daily report to Telegram
+        notifier.notify_daily_report(lesson_data, review, total, wins, losses)
     else:
         logger.error("Failed to save daily lesson to Supabase")
+        notifier.notify_error("Failed to save daily lesson to Supabase")
 
     logger.info("NIGHTLY REVIEW — Complete")

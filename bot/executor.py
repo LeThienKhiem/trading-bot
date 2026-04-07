@@ -12,7 +12,7 @@ from binance.client import Client as BinanceClient
 from binance.enums import SIDE_BUY, SIDE_SELL, ORDER_TYPE_MARKET, ORDER_TYPE_STOP_LOSS_LIMIT
 
 import config
-from bot import memory
+from bot import memory, notifier
 from bot.market_data import get_binance_client, get_current_price
 
 logger = logging.getLogger(__name__)
@@ -249,6 +249,13 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
 
     # Save account snapshot on each cycle
     save_account_snapshot(balance)
+
+    # Send Telegram notification
+    notifier.notify_trade(decision, market_data, balance)
+
+    # Alert on safety blocks
+    if not is_safe:
+        notifier.notify_error(f"Safety check blocked {decision.get('action')}: {reason}")
 
     return saved
 
