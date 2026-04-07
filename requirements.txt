@@ -1,0 +1,8 @@
+python-binance==1.0.19
+anthropic==0.42.0
+supabase==2.11.0
+pandas==2.2.3
+ta
+python-dotenv==1.0.1
+APScheduler==3.10.4
+requests==2.32.3
