@@ -180,14 +180,39 @@ def main() -> None:
     # Notify startup via Telegram
     notifier.notify_startup()
 
-    # Report server's outbound IP (needed for Binance API whitelist)
+    # Report server's outbound IP and wait for Binance API access
+    import time
+    import requests as _req
     try:
-        import requests as _req
         my_ip = _req.get("https://api.ipify.org", timeout=5).text
-        notifier.send_message(f"🌐 <b>Server IP:</b> <code>{my_ip}</code>\nAdd this to Binance API IP whitelist")
+        notifier.send_message(
+            f"🌐 <b>Server IP:</b> <code>{my_ip}</code>\n"
+            f"Add this to Binance API IP whitelist.\n"
+            f"⏳ Bot will wait up to 3 minutes for API access..."
+        )
         logger.info(f"Server outbound IP: {my_ip}")
     except Exception:
         pass
+
+    # Wait for Binance API to become accessible (user may need to whitelist IP)
+    from bot.market_data import get_binance_client
+    api_ready = False
+    for attempt in range(18):  # 18 x 10s = 3 minutes max
+        try:
+            client = get_binance_client()
+            client.get_account()
+            api_ready = True
+            logger.info("Binance API accessible — starting bot")
+            notifier.send_message("✅ Binance API connected! Bot starting...")
+            break
+        except Exception:
+            if attempt == 0:
+                logger.info("Binance API not ready — waiting for IP whitelist...")
+            time.sleep(10)
+
+    if not api_ready:
+        logger.warning("Binance API still not accessible after 3 min — starting anyway")
+        notifier.send_message("⚠️ Binance API not accessible after 3 min. Starting bot anyway — balance will show $0 until IP is whitelisted.")
 
     # If --verify, run one cycle and exit
     if config.DRY_RUN:
