@@ -180,6 +180,15 @@ def main() -> None:
     # Notify startup via Telegram
     notifier.notify_startup()
 
+    # Report server's outbound IP (needed for Binance API whitelist)
+    try:
+        import requests as _req
+        my_ip = _req.get("https://api.ipify.org", timeout=5).text
+        notifier.send_message(f"🌐 <b>Server IP:</b> <code>{my_ip}</code>\nAdd this to Binance API IP whitelist")
+        logger.info(f"Server outbound IP: {my_ip}")
+    except Exception:
+        pass
+
     # Quick balance diagnostic on startup
     logger.info("Running startup balance check...")
     try:
