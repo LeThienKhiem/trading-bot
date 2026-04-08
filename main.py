@@ -189,34 +189,6 @@ def main() -> None:
     except Exception:
         pass
 
-    # Quick balance diagnostic on startup
-    logger.info("Running startup balance check...")
-    try:
-        from bot.market_data import get_binance_client
-        client = get_binance_client()
-        account = client.get_account()
-        acc_type = account.get("accountType", "?")
-        can_trade = account.get("canTrade", "?")
-        non_zero = []
-        for b in account.get("balances", []):
-            f_val = float(b["free"])
-            l_val = float(b["locked"])
-            if f_val > 0 or l_val > 0:
-                non_zero.append(f"{b['asset']}: free={f_val}, locked={l_val}")
-        diag = (
-            f"🔍 <b>STARTUP BALANCE CHECK</b>\n"
-            f"Account type: {acc_type}\n"
-            f"canTrade: {can_trade}\n"
-            f"Non-zero assets ({len(non_zero)}):\n"
-        )
-        diag += "\n".join(non_zero[:15]) if non_zero else "⚠️ ALL ZERO — check API key permissions"
-        notifier.send_message(diag)
-        logger.info(f"Balance check: {len(non_zero)} non-zero assets, type={acc_type}")
-    except Exception as e:
-        err_msg = f"🚨 <b>BALANCE CHECK FAILED</b>\n<code>{type(e).__name__}: {str(e)[:500]}</code>"
-        notifier.send_message(err_msg)
-        logger.error(f"Balance check failed: {e}", exc_info=True)
-
     # If --verify, run one cycle and exit
     if config.DRY_RUN:
         logger.info("Running verification cycle (dry run)...")

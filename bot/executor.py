@@ -52,48 +52,15 @@ def get_account_balance() -> dict:
         client = get_binance_client()
         account = client.get_account()
 
-        # Debug: send raw account permissions to Telegram
-        can_trade = account.get("canTrade", "?")
-        can_withdraw = account.get("canWithdraw", "?")
-        can_deposit = account.get("canDeposit", "?")
-        account_type = account.get("accountType", "?")
-        total_balances_count = len(account.get("balances", []))
-        logger.info(
-            f"Binance account: type={account_type}, canTrade={can_trade}, "
-            f"canWithdraw={can_withdraw}, canDeposit={can_deposit}, "
-            f"total_assets={total_balances_count}"
-        )
-
         # Build balance dict with both free and locked amounts
         free_balances = {}
         locked_balances = {}
-        non_zero_assets = []
         for b in account["balances"]:
             free_val = float(b["free"])
             locked_val = float(b["locked"])
             if free_val > 0 or locked_val > 0:
                 free_balances[b["asset"]] = free_val
                 locked_balances[b["asset"]] = locked_val
-                non_zero_assets.append(
-                    f"{b['asset']}: free={free_val}, locked={locked_val}"
-                )
-                logger.info(
-                    f"  {b['asset']}: free={free_val}, locked={locked_val}"
-                )
-
-        # Send diagnostic to Telegram (temporary debug)
-        diag = (
-            f"🔍 <b>BALANCE DEBUG</b>\n"
-            f"Account type: {account_type}\n"
-            f"canTrade: {can_trade}\n"
-            f"Total assets in response: {total_balances_count}\n"
-            f"Non-zero assets: {len(non_zero_assets)}\n"
-        )
-        if non_zero_assets:
-            diag += "\n".join(non_zero_assets[:10])
-        else:
-            diag += "⚠️ ALL BALANCES ARE ZERO"
-        notifier.send_message(diag)
 
         usdt_free = free_balances.get("USDT", 0.0)
         usdt_locked = locked_balances.get("USDT", 0.0)
@@ -133,10 +100,7 @@ def get_account_balance() -> dict:
 
     except Exception as e:
         logger.error(f"Failed to fetch account balance: {e}", exc_info=True)
-        notifier.send_message(
-            f"🚨 <b>BALANCE ERROR</b>\n"
-            f"<code>{type(e).__name__}: {str(e)[:300]}</code>"
-        )
+        notifier.notify_error(f"Cannot read Binance balance: {type(e).__name__}")
         return {"usdt": 0.0, "usdt_total": 0.0, "btc": 0.0, "btc_total": 0.0, "btc_bot": 0.0, "total_usdt": 0.0}
 
 
