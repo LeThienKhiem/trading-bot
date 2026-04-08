@@ -51,32 +51,59 @@ def get_account_balance() -> dict:
     try:
         client = get_binance_client()
         account = client.get_account()
-        balances = {b["asset"]: float(b["free"]) for b in account["balances"]}
 
-        usdt = balances.get("USDT", 0.0)
-        btc = balances.get("BTC", 0.0)
+        # Build balance dict with both free and locked amounts
+        free_balances = {}
+        locked_balances = {}
+        for b in account["balances"]:
+            free_val = float(b["free"])
+            locked_val = float(b["locked"])
+            if free_val > 0 or locked_val > 0:
+                free_balances[b["asset"]] = free_val
+                locked_balances[b["asset"]] = locked_val
+                logger.info(
+                    f"  {b['asset']}: free={free_val}, locked={locked_val}"
+                )
+
+        usdt_free = free_balances.get("USDT", 0.0)
+        usdt_locked = locked_balances.get("USDT", 0.0)
+        usdt_total = usdt_free + usdt_locked
+        btc_free = free_balances.get("BTC", 0.0)
+        btc_locked = locked_balances.get("BTC", 0.0)
+        btc_total = btc_free + btc_locked
         btc_bot = get_bot_btc_quantity()
 
-        # Calculate total value in USDT (only count bot's BTC + USDT)
+        logger.info(
+            f"USDT: free={usdt_free}, locked={usdt_locked}, total={usdt_total}"
+        )
+        logger.info(
+            f"BTC: free={btc_free}, locked={btc_locked}, total={btc_total}"
+        )
+
+        # Use free USDT for trading decisions (locked is in pending orders)
+        # But report total for portfolio value
         btc_price = get_current_price() or 0
-        total = usdt + (btc_bot * btc_price)
+        total = usdt_free + (btc_bot * btc_price)
 
         balance = {
-            "usdt": round(usdt, 2),
-            "btc": btc,
+            "usdt": round(usdt_free, 2),
+            "usdt_total": round(usdt_total, 2),
+            "btc": btc_free,
+            "btc_total": btc_total,
             "btc_bot": btc_bot,
             "total_usdt": round(total, 2),
         }
         logger.info(
-            f"Account balance: ${balance['usdt']} USDT + "
+            f"Account balance: ${balance['usdt']} USDT (free) + "
+            f"${round(usdt_locked, 2)} USDT (locked) | "
             f"{balance['btc']:.8f} BTC (bot owns: {btc_bot:.8f} BTC) "
             f"= ~${balance['total_usdt']} (bot portfolio)"
         )
         return balance
 
     except Exception as e:
-        logger.error(f"Failed to fetch account balance: {e}")
-        return {"usdt": 0.0, "btc": 0.0, "btc_bot": 0.0, "total_usdt": 0.0}
+        logger.error(f"Failed to fetch account balance: {e}", exc_info=True)
+        return {"usdt": 0.0, "usdt_total": 0.0, "btc": 0.0, "btc_total": 0.0, "btc_bot": 0.0, "total_usdt": 0.0}
 
 
 def save_account_snapshot(balance: Optional[dict] = None) -> None:
