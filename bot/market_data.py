@@ -1,7 +1,7 @@
 """
-Market data fetcher for the trading bot.
-Collects BTC price, technical indicators (RSI, MACD), volume changes,
-Fear & Greed Index, and CryptoPanic news headlines.
+Market data fetcher for the trading bot (Quant Edition).
+Collects BTC price, multi-timeframe technical indicators, volume analysis,
+and Fear & Greed Index. Pure technical analysis — no news dependency.
 All external API calls are wrapped in try/except for resilience.
 """
 
@@ -33,15 +33,10 @@ def get_binance_client() -> BinanceClient:
     return _binance
 
 
-# ── Price & Indicators ───────────────────────────────────────────────────────
+# ── Price ────────────────────────────────────────────────────────────────────
 
 def get_current_price() -> Optional[float]:
-    """
-    Fetch the current BTC/USDT price from Binance.
-
-    Returns:
-        Current price as float, or None on failure.
-    """
+    """Fetch the current BTC/USDT price from Binance."""
     try:
         ticker = get_binance_client().get_symbol_ticker(symbol=config.SYMBOL)
         price = float(ticker["price"])
@@ -52,12 +47,15 @@ def get_current_price() -> Optional[float]:
         return None
 
 
-def get_1h_candles(limit: int = 100) -> Optional[pd.DataFrame]:
+# ── Candle Data (Multi-Timeframe) ────────────────────────────────────────────
+
+def get_candles(interval: str, limit: int = 100) -> Optional[pd.DataFrame]:
     """
-    Fetch 1-hour candles for BTC/USDT from Binance.
+    Fetch candles for BTC/USDT from Binance.
 
     Args:
-        limit: Number of candles to fetch (default 100).
+        interval: Binance kline interval (e.g. KLINE_INTERVAL_1HOUR).
+        limit: Number of candles to fetch.
 
     Returns:
         DataFrame with columns [open, high, low, close, volume], or None.
@@ -65,7 +63,7 @@ def get_1h_candles(limit: int = 100) -> Optional[pd.DataFrame]:
     try:
         klines = get_binance_client().get_klines(
             symbol=config.SYMBOL,
-            interval=BinanceClient.KLINE_INTERVAL_1HOUR,
+            interval=interval,
             limit=limit,
         )
         df = pd.DataFrame(klines, columns=[
@@ -77,43 +75,43 @@ def get_1h_candles(limit: int = 100) -> Optional[pd.DataFrame]:
             df[col] = df[col].astype(float)
         return df
     except Exception as e:
-        logger.error(f"Failed to fetch 1h candles: {e}")
+        logger.error(f"Failed to fetch {interval} candles: {e}")
         return None
 
 
+# ── Technical Indicators ─────────────────────────────────────────────────────
+
 def calculate_rsi(df: pd.DataFrame, period: int = 14) -> Optional[float]:
-    """
-    Calculate RSI(14) from a candle DataFrame.
-
-    Args:
-        df: DataFrame with a 'close' column.
-        period: RSI period (default 14).
-
-    Returns:
-        Latest RSI value as float, or None on failure.
-    """
+    """Calculate RSI from a candle DataFrame."""
     try:
         rsi = ta_lib.momentum.RSIIndicator(df["close"], window=period).rsi()
-        latest_rsi = round(float(rsi.iloc[-1]), 2)
-        logger.info(f"RSI({period}): {latest_rsi}")
-        return latest_rsi
+        return round(float(rsi.iloc[-1]), 2)
     except Exception as e:
         logger.error(f"Failed to calculate RSI: {e}")
         return None
 
 
-def calculate_macd(df: pd.DataFrame) -> Optional[str]:
+def calculate_macd(df: pd.DataFrame) -> Optional[dict]:
     """
-    Calculate MACD on a candle DataFrame and return signal direction.
+    Calculate MACD and return detailed info.
 
     Returns:
-        'bullish' if MACD > signal line, 'bearish' if below, 'neutral'
-        if they're roughly equal. Returns None on failure.
+        Dict with keys: signal, macd_value, signal_value, histogram, crossover.
     """
     try:
-        macd_indicator = ta_lib.trend.MACD(df["close"])
-        macd_line = float(macd_indicator.macd().iloc[-1])
-        signal_line = float(macd_indicator.macd_signal().iloc[-1])
+        macd_ind = ta_lib.trend.MACD(df["close"])
+        macd_line = float(macd_ind.macd().iloc[-1])
+        signal_line = float(macd_ind.macd_signal().iloc[-1])
+        histogram = float(macd_ind.macd_diff().iloc[-1])
+
+        # Check crossover (current vs previous)
+        prev_macd = float(macd_ind.macd().iloc[-2])
+        prev_signal = float(macd_ind.macd_signal().iloc[-2])
+        crossover = "none"
+        if prev_macd <= prev_signal and macd_line > signal_line:
+            crossover = "bullish_cross"
+        elif prev_macd >= prev_signal and macd_line < signal_line:
+            crossover = "bearish_cross"
 
         diff = macd_line - signal_line
         if diff > 0:
@@ -123,164 +121,285 @@ def calculate_macd(df: pd.DataFrame) -> Optional[str]:
         else:
             signal = "neutral"
 
-        logger.info(f"MACD signal: {signal} (diff={diff:.4f})")
-        return signal
+        return {
+            "signal": signal,
+            "macd_value": round(macd_line, 2),
+            "signal_value": round(signal_line, 2),
+            "histogram": round(histogram, 2),
+            "crossover": crossover,
+        }
     except Exception as e:
         logger.error(f"Failed to calculate MACD: {e}")
         return None
 
 
-def get_24h_volume_change() -> Optional[float]:
+def calculate_bollinger_bands(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> Optional[dict]:
     """
-    Fetch the 24h price change percent from Binance ticker stats.
+    Calculate Bollinger Bands.
 
     Returns:
-        24h price change percent as float, or None on failure.
+        Dict with keys: upper, middle, lower, bandwidth, percent_b.
+        percent_b: 0 = at lower band, 1 = at upper band, 0.5 = middle.
     """
     try:
-        stats = get_binance_client().get_ticker(symbol=config.SYMBOL)
-        change = float(stats["priceChangePercent"])
-        logger.info(f"24h price change: {change:.2f}%")
-        return round(change, 2)
+        bb = ta_lib.volatility.BollingerBands(df["close"], window=period, window_dev=std_dev)
+        upper = float(bb.bollinger_hband().iloc[-1])
+        middle = float(bb.bollinger_mavg().iloc[-1])
+        lower = float(bb.bollinger_lband().iloc[-1])
+        bandwidth = (upper - lower) / middle * 100 if middle > 0 else 0
+        price = float(df["close"].iloc[-1])
+        percent_b = (price - lower) / (upper - lower) if (upper - lower) > 0 else 0.5
+
+        return {
+            "upper": round(upper, 2),
+            "middle": round(middle, 2),
+            "lower": round(lower, 2),
+            "bandwidth": round(bandwidth, 2),
+            "percent_b": round(percent_b, 3),
+        }
     except Exception as e:
-        logger.error(f"Failed to fetch 24h volume change: {e}")
+        logger.error(f"Failed to calculate Bollinger Bands: {e}")
+        return None
+
+
+def calculate_emas(df: pd.DataFrame) -> Optional[dict]:
+    """
+    Calculate EMA 20, 50, 200.
+
+    Returns:
+        Dict with keys: ema_20, ema_50, ema_200, trend.
+        trend: 'strong_bull' if price > all EMAs in order,
+               'strong_bear' if price < all EMAs in order,
+               'bull', 'bear', or 'mixed'.
+    """
+    try:
+        price = float(df["close"].iloc[-1])
+        ema_20 = float(ta_lib.trend.EMAIndicator(df["close"], window=20).ema_indicator().iloc[-1])
+        ema_50 = float(ta_lib.trend.EMAIndicator(df["close"], window=50).ema_indicator().iloc[-1])
+
+        # EMA 200 needs enough data
+        if len(df) >= 200:
+            ema_200 = float(ta_lib.trend.EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1])
+        else:
+            ema_200 = None
+
+        # Determine trend
+        if ema_200 is not None:
+            if price > ema_20 > ema_50 > ema_200:
+                trend = "strong_bull"
+            elif price < ema_20 < ema_50 < ema_200:
+                trend = "strong_bear"
+            elif price > ema_50:
+                trend = "bull"
+            elif price < ema_50:
+                trend = "bear"
+            else:
+                trend = "mixed"
+        else:
+            if price > ema_20 > ema_50:
+                trend = "bull"
+            elif price < ema_20 < ema_50:
+                trend = "bear"
+            else:
+                trend = "mixed"
+
+        return {
+            "ema_20": round(ema_20, 2),
+            "ema_50": round(ema_50, 2),
+            "ema_200": round(ema_200, 2) if ema_200 else None,
+            "trend": trend,
+        }
+    except Exception as e:
+        logger.error(f"Failed to calculate EMAs: {e}")
+        return None
+
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    """Calculate Average True Range — measures volatility."""
+    try:
+        atr = ta_lib.volatility.AverageTrueRange(
+            df["high"], df["low"], df["close"], window=period
+        ).average_true_range()
+        return round(float(atr.iloc[-1]), 2)
+    except Exception as e:
+        logger.error(f"Failed to calculate ATR: {e}")
+        return None
+
+
+def calculate_volume_profile(df: pd.DataFrame) -> Optional[dict]:
+    """
+    Analyze volume patterns.
+
+    Returns:
+        Dict with volume_sma_ratio (current vs 20-period average),
+        volume_trend ('increasing', 'decreasing', 'stable'),
+        buy_pressure (taker buy volume / total volume ratio).
+    """
+    try:
+        vol = df["volume"]
+        vol_sma = vol.rolling(window=20).mean().iloc[-1]
+        current_vol = vol.iloc[-1]
+        ratio = current_vol / vol_sma if vol_sma > 0 else 1.0
+
+        # Volume trend over last 5 candles
+        recent_vol = vol.iloc[-5:].values
+        if recent_vol[-1] > recent_vol[0] * 1.2:
+            vol_trend = "increasing"
+        elif recent_vol[-1] < recent_vol[0] * 0.8:
+            vol_trend = "decreasing"
+        else:
+            vol_trend = "stable"
+
+        # Buy pressure
+        taker_buy = df["taker_buy_base"].astype(float)
+        buy_pressure = float(taker_buy.iloc[-1]) / current_vol if current_vol > 0 else 0.5
+
+        return {
+            "volume_sma_ratio": round(ratio, 2),
+            "volume_trend": vol_trend,
+            "buy_pressure": round(buy_pressure, 3),
+        }
+    except Exception as e:
+        logger.error(f"Failed to calculate volume profile: {e}")
+        return None
+
+
+def find_support_resistance(df: pd.DataFrame) -> Optional[dict]:
+    """
+    Find recent support and resistance levels using pivot points.
+
+    Returns:
+        Dict with nearest_support, nearest_resistance, distance_to_support_pct,
+        distance_to_resistance_pct.
+    """
+    try:
+        price = float(df["close"].iloc[-1])
+        highs = df["high"].iloc[-50:].values
+        lows = df["low"].iloc[-50:].values
+
+        # Simple approach: recent swing highs/lows
+        resistance_levels = []
+        support_levels = []
+
+        for i in range(2, len(highs) - 2):
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                resistance_levels.append(float(highs[i]))
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                support_levels.append(float(lows[i]))
+
+        # Find nearest levels
+        supports_below = [s for s in support_levels if s < price]
+        resistances_above = [r for r in resistance_levels if r > price]
+
+        nearest_support = max(supports_below) if supports_below else price * 0.97
+        nearest_resistance = min(resistances_above) if resistances_above else price * 1.03
+
+        return {
+            "nearest_support": round(nearest_support, 2),
+            "nearest_resistance": round(nearest_resistance, 2),
+            "distance_to_support_pct": round((price - nearest_support) / price * 100, 2),
+            "distance_to_resistance_pct": round((nearest_resistance - price) / price * 100, 2),
+        }
+    except Exception as e:
+        logger.error(f"Failed to find S/R levels: {e}")
+        return None
+
+
+# ── 24h Stats ────────────────────────────────────────────────────────────────
+
+def get_24h_stats() -> Optional[dict]:
+    """Fetch 24h ticker stats from Binance."""
+    try:
+        stats = get_binance_client().get_ticker(symbol=config.SYMBOL)
+        return {
+            "price_change_pct": round(float(stats["priceChangePercent"]), 2),
+            "high_24h": round(float(stats["highPrice"]), 2),
+            "low_24h": round(float(stats["lowPrice"]), 2),
+            "volume_24h": round(float(stats["volume"]), 2),
+            "quote_volume_24h": round(float(stats["quoteVolume"]), 2),
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch 24h stats: {e}")
         return None
 
 
 # ── Fear & Greed Index ───────────────────────────────────────────────────────
 
 def get_fear_greed_index() -> Optional[int]:
-    """
-    Fetch the current Crypto Fear & Greed Index from alternative.me.
-
-    Returns:
-        Index value (0-100) as int, or None on failure.
-        0 = Extreme Fear, 100 = Extreme Greed.
-    """
+    """Fetch the current Crypto Fear & Greed Index (0-100)."""
     try:
         resp = requests.get(config.FEAR_GREED_URL, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         value = int(data["data"][0]["value"])
-        classification = data["data"][0]["value_classification"]
-        logger.info(f"Fear & Greed Index: {value} ({classification})")
+        logger.info(f"Fear & Greed Index: {value}")
         return value
     except Exception as e:
         logger.error(f"Failed to fetch Fear & Greed Index: {e}")
         return None
 
 
-# ── Crypto News (CoinGecko Trending — free, no key) ─────────────────────────
-
-def get_crypto_news() -> tuple[str, str]:
-    """
-    Fetch trending coins and market buzz from CoinGecko (free API).
-    Uses trending data + Fear & Greed to infer sentiment since CryptoPanic
-    free tier was discontinued in April 2026.
-
-    Returns:
-        Tuple of (headlines_text, sentiment).
-        - headlines_text: formatted string of trending crypto topics
-        - sentiment: 'positive', 'negative', or 'neutral'
-        Returns ('No news available', 'neutral') on failure.
-    """
-    try:
-        # Fetch trending coins from CoinGecko
-        resp = requests.get(config.COINGECKO_BTC_URL, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        coins = data.get("coins", [])[:5]
-        headlines = []
-        btc_trending = False
-
-        for item in coins:
-            coin = item.get("item", {})
-            name = coin.get("name", "Unknown")
-            symbol = coin.get("symbol", "")
-            market_cap_rank = coin.get("market_cap_rank", "N/A")
-            price_change_24h = coin.get("data", {}).get(
-                "price_change_percentage_24h", {}
-            ).get("usd", 0)
-
-            direction = "up" if price_change_24h > 0 else "down"
-            headlines.append(
-                f"- {name} ({symbol}) trending — rank #{market_cap_rank}, "
-                f"24h {direction} {abs(price_change_24h):.1f}%"
-            )
-            if symbol.upper() == "BTC":
-                btc_trending = True
-
-        # Also fetch BTC-specific market data for sentiment
-        try:
-            btc_resp = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "bitcoin",
-                    "vs_currencies": "usd",
-                    "include_24hr_change": "true",
-                },
-                timeout=10,
-            )
-            btc_resp.raise_for_status()
-            btc_data = btc_resp.json().get("bitcoin", {})
-            btc_24h_change = btc_data.get("usd_24h_change", 0)
-
-            headlines.insert(0, f"- BTC 24h change: {btc_24h_change:+.2f}%")
-
-            # Derive sentiment from BTC price movement
-            if btc_24h_change > 3:
-                sentiment = "positive"
-            elif btc_24h_change < -3:
-                sentiment = "negative"
-            else:
-                sentiment = "neutral"
-        except Exception:
-            sentiment = "neutral"
-
-        if not headlines:
-            return "No trending crypto data available", "neutral"
-
-        headlines_text = "\n".join(headlines)
-        logger.info(f"Crypto news sentiment: {sentiment} ({len(headlines)} items)")
-        return headlines_text, sentiment
-
-    except Exception as e:
-        logger.error(f"Failed to fetch crypto news: {e}")
-        return "No news available", "neutral"
-
-
 # ── Aggregate All Market Data ────────────────────────────────────────────────
+
+def analyze_timeframe(interval: str, label: str, limit: int = 100) -> dict:
+    """Run full technical analysis on a single timeframe."""
+    df = get_candles(interval, limit)
+    if df is None:
+        return {"error": f"Failed to fetch {label} candles"}
+
+    rsi = calculate_rsi(df)
+    macd = calculate_macd(df)
+    bb = calculate_bollinger_bands(df)
+    emas = calculate_emas(df)
+    atr = calculate_atr(df)
+    volume = calculate_volume_profile(df)
+    sr = find_support_resistance(df)
+
+    result = {
+        "rsi": rsi,
+        "macd": macd or {"signal": "neutral", "crossover": "none", "histogram": 0},
+        "bollinger": bb,
+        "emas": emas,
+        "atr": atr,
+        "volume": volume,
+        "support_resistance": sr,
+    }
+    logger.info(f"{label} analysis: RSI={rsi}, MACD={macd['signal'] if macd else 'N/A'}, EMA trend={emas['trend'] if emas else 'N/A'}")
+    return result
+
 
 def fetch_all_market_data() -> Optional[dict]:
     """
-    Fetch all market data in one call: price, indicators, sentiment, news.
+    Fetch all market data: price, multi-timeframe indicators, sentiment.
     This is the main function called by the trade cycle.
-
-    Returns:
-        Dict with all market data fields, or None if critical data
-        (price) is unavailable.
     """
     price = get_current_price()
     if price is None:
         logger.error("Cannot proceed without BTC price")
         return None
 
-    candles = get_1h_candles()
-    rsi = calculate_rsi(candles) if candles is not None else None
-    macd = calculate_macd(candles) if candles is not None else None
-    volume_change = get_24h_volume_change()
+    # Multi-timeframe analysis
+    tf_1h = analyze_timeframe(BinanceClient.KLINE_INTERVAL_1HOUR, "1H", 200)
+    tf_4h = analyze_timeframe(BinanceClient.KLINE_INTERVAL_4HOUR, "4H", 200)
+
+    # 24h stats
+    stats_24h = get_24h_stats()
+
+    # Fear & Greed (keep as sentiment gauge, not for decisions)
     fear_greed = get_fear_greed_index()
-    headlines, news_sentiment = get_crypto_news()
 
     market_data = {
         "btc_price": price,
-        "rsi_1h": rsi,
-        "macd_signal": macd or "neutral",
-        "volume_change_24h": volume_change,
+        "timeframes": {
+            "1h": tf_1h,
+            "4h": tf_4h,
+        },
+        "stats_24h": stats_24h or {},
         "fear_greed_index": fear_greed,
-        "top_news_headlines": headlines,
-        "news_sentiment": news_sentiment,
+        # Backward compat fields
+        "rsi_1h": tf_1h.get("rsi"),
+        "macd_signal": tf_1h.get("macd", {}).get("signal", "neutral"),
+        "volume_change_24h": stats_24h.get("price_change_pct") if stats_24h else None,
     }
 
     logger.info("All market data fetched successfully")
