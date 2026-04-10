@@ -316,7 +316,8 @@ def _execute_buy(balance: dict, current_price: float, usdt_to_spend: float) -> O
         }
 
     except Exception as e:
-        logger.error(f"BUY order failed: {e}")
+        logger.error(f"BUY order failed: {e}", exc_info=True)
+        notifier.notify_error(f"BUY failed: {type(e).__name__}: {str(e)[:200]}")
         return None
 
 
@@ -328,11 +329,17 @@ def _execute_sell(balance: dict, current_price: float, open_positions: list[dict
 
         if btc_to_sell <= 0:
             logger.warning("No bot BTC to sell")
+            notifier.notify_error("SELL failed: btc_bot = 0 (no positions)")
             return None
 
-        if btc_to_sell > balance["btc"]:
-            logger.warning(f"Bot owns {btc_to_sell:.8f} but only {balance['btc']:.8f} available")
-            btc_to_sell = balance["btc"]
+        actual_btc = balance.get("btc", 0)
+        if btc_to_sell > actual_btc:
+            logger.warning(f"Bot owns {btc_to_sell:.8f} but only {actual_btc:.8f} available")
+            btc_to_sell = actual_btc
+
+        if btc_to_sell <= 0:
+            notifier.notify_error(f"SELL failed: no BTC available (bot={balance.get('btc_bot', 0):.8f}, actual={actual_btc:.8f})")
+            return None
 
         # Format quantity
         info = client.get_symbol_info(config.SYMBOL)
@@ -342,6 +349,8 @@ def _execute_sell(balance: dict, current_price: float, open_positions: list[dict
                 precision = len(str(step_size).rstrip("0").split(".")[-1])
                 btc_to_sell = round(btc_to_sell, precision)
                 break
+
+        logger.info(f"Attempting SELL: {btc_to_sell:.8f} BTC")
 
         order = client.create_order(
             symbol=config.SYMBOL,
@@ -363,7 +372,12 @@ def _execute_sell(balance: dict, current_price: float, open_positions: list[dict
         }
 
     except Exception as e:
-        logger.error(f"SELL order failed: {e}")
+        logger.error(f"SELL order failed: {e}", exc_info=True)
+        notifier.notify_error(
+            f"SELL failed on Binance:\n"
+            f"<code>{type(e).__name__}: {str(e)[:300]}</code>\n"
+            f"btc_to_sell={btc_to_sell:.8f}, btc_bot={balance.get('btc_bot', 0):.8f}"
+        )
         return None
 
 
