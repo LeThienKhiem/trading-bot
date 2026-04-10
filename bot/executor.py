@@ -273,8 +273,14 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
     saved = memory.save_trade(trade_record)
     save_account_snapshot(balance)
 
-    # Telegram notification
-    notifier.notify_trade(decision, market_data, balance, daily_pnl)
+    # Telegram notification — use trade_record (actual result), not decision (intent)
+    actual_decision = dict(decision)
+    actual_decision["action"] = trade_record["action"]
+    actual_decision["reasoning"] = trade_record["reasoning"]
+    # Refresh balance after execution
+    if trade_record["action"] in ("BUY", "SELL"):
+        balance = get_account_balance()
+    notifier.notify_trade(actual_decision, market_data, balance, daily_pnl)
 
     return saved
 
