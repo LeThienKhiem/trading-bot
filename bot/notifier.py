@@ -49,6 +49,10 @@ def notify_trade(
     reasoning = decision.get("reasoning", "N/A")
     price = market_data.get("btc_price", 0)
     setup = decision.get("setup_quality", "N/A")
+    if action == "SELL":
+        setup = "EXIT"
+    elif action in ("HOLD", "BLOCKED"):
+        setup = "—"
     rr = decision.get("risk_reward_ratio", "N/A")
     regime = decision.get("market_regime", "N/A")
     risk = decision.get("risk_level", "N/A")
