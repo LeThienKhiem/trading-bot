@@ -73,6 +73,9 @@ def trade_cycle() -> None:
     logger.info(f"{mode}TRADE CYCLE — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     logger.info("=" * 60)
 
+    # Step 0: Reconcile positions (fix ghost positions)
+    executor.reconcile_positions()
+
     # Step 1: Market data
     logger.info("Fetching multi-timeframe market data...")
     mkt_data = market_data.fetch_all_market_data()

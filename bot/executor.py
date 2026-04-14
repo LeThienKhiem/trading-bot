@@ -29,6 +29,62 @@ def get_bot_btc_quantity() -> float:
     return total_btc
 
 
+def reconcile_positions() -> None:
+    """
+    Reconcile Supabase positions with actual Binance balance.
+    If Supabase says we have open BUY positions but Binance has 0 BTC,
+    close the ghost positions to unblock trading.
+    """
+    open_trades = memory.get_open_trades()
+    if not open_trades:
+        return
+
+    try:
+        client = get_binance_client()
+        account = client.get_account()
+        actual_btc = 0.0
+        for b in account["balances"]:
+            if b["asset"] == "BTC":
+                actual_btc = float(b["free"]) + float(b["locked"])
+                break
+
+        supabase_btc = sum(
+            t["quantity_usdt"] / t["price_at_decision"]
+            for t in open_trades
+            if t.get("action") == "BUY" and t.get("quantity_usdt") and t.get("price_at_decision")
+        )
+
+        # If Supabase thinks we have BTC but Binance has (almost) none
+        if supabase_btc > 0 and actual_btc < supabase_btc * 0.1:
+            price = get_current_price() or 0
+            logger.warning(
+                f"RECONCILIATION: Supabase has {supabase_btc:.8f} BTC but "
+                f"Binance has {actual_btc:.8f}. Closing ghost positions."
+            )
+            for pos in open_trades:
+                if pos.get("action") == "BUY":
+                    entry = pos.get("price_at_decision", 0)
+                    qty = pos.get("quantity_usdt", 0)
+                    pnl_pct = ((price - entry) / entry * 100) if entry > 0 else 0
+                    pnl_usdt = qty * (pnl_pct / 100)
+                    memory.update_trade(pos["id"], {
+                        "status": "closed",
+                        "exit_price": price,
+                        "pnl_usdt": round(pnl_usdt, 2),
+                        "pnl_percent": round(pnl_pct, 2),
+                    })
+                    logger.info(f"Closed ghost position {pos['id']}")
+
+            notifier.send_message(
+                f"🔧 <b>RECONCILIATION</b>\n"
+                f"Closed {len([t for t in open_trades if t.get('action') == 'BUY'])} ghost positions\n"
+                f"Supabase said {supabase_btc:.8f} BTC, Binance has {actual_btc:.8f}\n"
+                f"Bot is now unblocked and ready to trade."
+            )
+    except Exception as e:
+        logger.error(f"Reconciliation failed: {e}")
+
+
 def get_account_balance() -> dict:
     """Fetch current USDT and BTC balances from Binance."""
     try:
