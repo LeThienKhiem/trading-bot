@@ -32,37 +32,54 @@ def get_bot_btc_quantity() -> float:
 def reconcile_positions() -> None:
     """
     Reconcile Supabase positions with actual Binance balance.
-    If Supabase says we have open BUY positions but Binance has 0 BTC,
-    close the ghost positions to unblock trading.
+
+    Fixes two types of ghost positions:
+    1. Open BUY positions when Binance has 0 BTC (BTC was sold/moved externally)
+    2. Open SELL/HOLD/BLOCKED records that should never be "open"
+       (bug: SELL was saved as "open" instead of "closed")
     """
     open_trades = memory.get_open_trades()
     if not open_trades:
         return
 
-    try:
-        client = get_binance_client()
-        account = client.get_account()
-        actual_btc = 0.0
-        for b in account["balances"]:
-            if b["asset"] == "BTC":
-                actual_btc = float(b["free"]) + float(b["locked"])
-                break
+    fixed_count = 0
 
-        supabase_btc = sum(
-            t["quantity_usdt"] / t["price_at_decision"]
-            for t in open_trades
-            if t.get("action") == "BUY" and t.get("quantity_usdt") and t.get("price_at_decision")
-        )
-
-        # If Supabase thinks we have BTC but Binance has (almost) none
-        if supabase_btc > 0 and actual_btc < supabase_btc * 0.1:
-            price = get_current_price() or 0
+    # Fix 1: Close any non-BUY records that are incorrectly "open"
+    # Only BUY positions should ever have status="open" (they represent held BTC)
+    for pos in open_trades:
+        if pos.get("action") != "BUY":
             logger.warning(
-                f"RECONCILIATION: Supabase has {supabase_btc:.8f} BTC but "
-                f"Binance has {actual_btc:.8f}. Closing ghost positions."
+                f"RECONCILIATION: Closing orphaned {pos.get('action')} record {pos['id']}"
             )
-            for pos in open_trades:
-                if pos.get("action") == "BUY":
+            memory.update_trade(pos["id"], {"status": "closed"})
+            fixed_count += 1
+
+    # Fix 2: Close ghost BUY positions (Supabase says BTC, Binance has none)
+    open_buys = [t for t in open_trades if t.get("action") == "BUY"]
+    if open_buys:
+        try:
+            client = get_binance_client()
+            account = client.get_account()
+            actual_btc = 0.0
+            for b in account["balances"]:
+                if b["asset"] == "BTC":
+                    actual_btc = float(b["free"]) + float(b["locked"])
+                    break
+
+            supabase_btc = sum(
+                t["quantity_usdt"] / t["price_at_decision"]
+                for t in open_buys
+                if t.get("quantity_usdt") and t.get("price_at_decision")
+            )
+
+            # If Supabase thinks we have BTC but Binance has (almost) none
+            if supabase_btc > 0 and actual_btc < supabase_btc * 0.1:
+                price = get_current_price() or 0
+                logger.warning(
+                    f"RECONCILIATION: Supabase has {supabase_btc:.8f} BTC but "
+                    f"Binance has {actual_btc:.8f}. Closing ghost BUY positions."
+                )
+                for pos in open_buys:
                     entry = pos.get("price_at_decision", 0)
                     qty = pos.get("quantity_usdt", 0)
                     pnl_pct = ((price - entry) / entry * 100) if entry > 0 else 0
@@ -73,16 +90,18 @@ def reconcile_positions() -> None:
                         "pnl_usdt": round(pnl_usdt, 2),
                         "pnl_percent": round(pnl_pct, 2),
                     })
-                    logger.info(f"Closed ghost position {pos['id']}")
+                    fixed_count += 1
+                    logger.info(f"Closed ghost BUY position {pos['id']}")
 
-            notifier.send_message(
-                f"🔧 <b>RECONCILIATION</b>\n"
-                f"Closed {len([t for t in open_trades if t.get('action') == 'BUY'])} ghost positions\n"
-                f"Supabase said {supabase_btc:.8f} BTC, Binance has {actual_btc:.8f}\n"
-                f"Bot is now unblocked and ready to trade."
-            )
-    except Exception as e:
-        logger.error(f"Reconciliation failed: {e}")
+        except Exception as e:
+            logger.error(f"Reconciliation (BUY check) failed: {e}")
+
+    if fixed_count > 0:
+        notifier.send_message(
+            f"🔧 <b>RECONCILIATION</b>\n"
+            f"Fixed {fixed_count} ghost/orphaned positions\n"
+            f"Bot is now unblocked and ready to trade."
+        )
 
 
 def get_account_balance() -> dict:
@@ -216,9 +235,10 @@ def run_safety_checks(
 
     # BUY checks
     if action == "BUY":
-        # Can't buy if already holding
-        if open_positions:
-            return False, "Already have an open position — max 1 at a time"
+        # Can't buy if already holding BTC
+        open_buys = [p for p in open_positions if p.get("action") == "BUY"]
+        if open_buys:
+            return False, "Already have an open BUY position — max 1 at a time"
 
         trade_amount = calculate_position_size(decision, balance)
         if trade_amount < 10:
@@ -267,7 +287,7 @@ def execute_decision(decision: dict, market_data: dict) -> Optional[dict]:
         "reasoning": decision.get("reasoning", reason),
         "confidence": decision.get("confidence", 0),
         "suggested_stop_loss": stop_loss_price,
-        "status": "closed" if action in ("HOLD", "BLOCKED") else "open",
+        "status": "open" if action == "BUY" else "closed",
     }
 
     if action == "BLOCKED":
