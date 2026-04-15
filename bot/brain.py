@@ -117,6 +117,12 @@ POSITION SIZING:
 - Confidence 7: 20-30%
 - Below 7: DO NOT TRADE
 
+STATE AWARENESS:
+- Check "CURRENT STATE" first. It tells you exactly what actions are available.
+- NO POSITION (100% USDT): you can BUY or HOLD. Never output SELL.
+- HOLDING BTC: you can SELL or HOLD. Never output BUY.
+- HOLD means "wait for better setup" — always explain WHICH condition is missing.
+
 LEARNING: You receive last 30 trades + 14 daily lessons.
 Reference them explicitly: "Strategy A triggered 3 times this week, won 2/3"
 
@@ -244,7 +250,24 @@ def build_context(
                 streak = 1
                 break
 
-    context = f"""=== BTC/USDT PRICE ===
+    # Determine current state clearly
+    btc_bot = account_balance.get('btc_bot', 0)
+    has_position = btc_bot > 0 and open_positions
+    if has_position:
+        state_str = (
+            f"STATE: HOLDING BTC — you can only SELL or HOLD\n"
+            f"You own {btc_bot:.8f} BTC. Decide whether to take profit/cut loss or keep holding."
+        )
+    else:
+        state_str = (
+            f"STATE: NO POSITION (100% USDT) — you can only BUY or HOLD\n"
+            f"Look for a clean Strategy A or B setup. If no setup exists, HOLD and wait."
+        )
+
+    context = f"""=== CURRENT STATE ===
+{state_str}
+
+=== BTC/USDT PRICE ===
 ${market_data['btc_price']:,.2f}
 
 === MULTI-TIMEFRAME TECHNICAL ANALYSIS ===
