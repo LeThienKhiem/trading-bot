@@ -5,6 +5,7 @@ and integration with price monitor for stop-loss/take-profit.
 """
 
 import logging
+import math
 from typing import Optional
 
 from binance.client import Client as BinanceClient
@@ -401,32 +402,52 @@ def _execute_sell(balance: dict, current_price: float, open_positions: list[dict
     """Execute a market SELL order. Only sells bot-owned BTC."""
     try:
         client = get_binance_client()
-        btc_to_sell = balance.get("btc_bot", 0)
+        bot_btc = balance.get("btc_bot", 0)
 
-        if btc_to_sell <= 0:
+        if bot_btc <= 0:
             logger.warning("No bot BTC to sell")
             notifier.notify_error("SELL failed: btc_bot = 0 (no positions)")
             return None
 
-        actual_btc = balance.get("btc", 0)
-        if btc_to_sell > actual_btc:
-            logger.warning(f"Bot owns {btc_to_sell:.8f} but only {actual_btc:.8f} available")
-            btc_to_sell = actual_btc
+        # Re-read FREE balance directly from Binance (authoritative, not balance dict
+        # which may be slightly stale or include locked amounts).
+        account = client.get_account()
+        actual_btc = 0.0
+        for b in account["balances"]:
+            if b["asset"] == "BTC":
+                actual_btc = float(b["free"])
+                break
 
+        btc_to_sell = min(bot_btc, actual_btc)
         if btc_to_sell <= 0:
-            notifier.notify_error(f"SELL failed: no BTC available (bot={balance.get('btc_bot', 0):.8f}, actual={actual_btc:.8f})")
+            notifier.notify_error(
+                f"SELL failed: no free BTC available "
+                f"(bot={bot_btc:.8f}, free={actual_btc:.8f})"
+            )
             return None
 
-        # Format quantity
+        # Format quantity — MUST truncate (floor) to stay within free balance.
+        # `round()` can round UP past actual_btc → Binance -2010 insufficient balance.
         info = client.get_symbol_info(config.SYMBOL)
         for f in info["filters"]:
             if f["filterType"] == "LOT_SIZE":
                 step_size = float(f["stepSize"])
                 precision = len(str(step_size).rstrip("0").split(".")[-1])
-                btc_to_sell = round(btc_to_sell, precision)
+                factor = 10 ** precision
+                btc_to_sell = math.floor(btc_to_sell * factor) / factor
                 break
 
-        logger.info(f"Attempting SELL: {btc_to_sell:.8f} BTC")
+        if btc_to_sell <= 0:
+            notifier.notify_error(
+                f"SELL failed: quantity below LOT_SIZE after truncation "
+                f"(free={actual_btc:.8f})"
+            )
+            return None
+
+        logger.info(
+            f"Attempting SELL: {btc_to_sell:.8f} BTC "
+            f"(bot_btc={bot_btc:.8f}, free={actual_btc:.8f})"
+        )
 
         order = client.create_order(
             symbol=config.SYMBOL,

@@ -6,6 +6,7 @@ This is the fast-reaction layer — no Claude calls, pure rule-based execution.
 """
 
 import logging
+import math
 import threading
 import time
 from typing import Optional
@@ -159,34 +160,52 @@ class PriceMonitor:
 
         try:
             client = get_binance_client()
-            btc_to_sell = get_bot_btc_quantity()
+            bot_btc = get_bot_btc_quantity()
 
-            if btc_to_sell <= 0:
+            if bot_btc <= 0:
                 logger.warning("No bot BTC to sell in emergency")
                 self.clear_position()
                 return
 
-            # Get actual Binance balance
+            # Get actual Binance FREE balance (source of truth — never trust Supabase alone)
             account = client.get_account()
-            actual_btc = 0
+            actual_btc = 0.0
             for b in account["balances"]:
                 if b["asset"] == "BTC":
                     actual_btc = float(b["free"])
                     break
 
-            btc_to_sell = min(btc_to_sell, actual_btc)
+            # Sell only what's actually available (cap by free balance)
+            btc_to_sell = min(bot_btc, actual_btc)
             if btc_to_sell <= 0:
+                logger.warning(
+                    f"No free BTC to sell (bot_btc={bot_btc:.8f}, free={actual_btc:.8f})"
+                )
                 self.clear_position()
                 return
 
-            # Format quantity properly
+            # Format quantity — MUST truncate (floor), not round, or we can ask for
+            # more than we have and Binance returns -2010 insufficient balance.
             info = client.get_symbol_info(config.SYMBOL)
             for f in info["filters"]:
                 if f["filterType"] == "LOT_SIZE":
                     step_size = float(f["stepSize"])
                     precision = len(str(step_size).rstrip("0").split(".")[-1])
-                    btc_to_sell = round(btc_to_sell, precision)
+                    factor = 10 ** precision
+                    btc_to_sell = math.floor(btc_to_sell * factor) / factor
                     break
+
+            if btc_to_sell <= 0:
+                logger.warning(
+                    f"BTC quantity below LOT_SIZE after truncation (free={actual_btc:.8f})"
+                )
+                self.clear_position()
+                return
+
+            logger.info(
+                f"Emergency SELL prep: bot_btc={bot_btc:.8f}, free={actual_btc:.8f}, "
+                f"to_sell={btc_to_sell:.8f}"
+            )
 
             if config.DRY_RUN:
                 logger.info(f"[DRY RUN] Would {trigger} sell {btc_to_sell:.8f} BTC @ ${current_price:,.2f}")
